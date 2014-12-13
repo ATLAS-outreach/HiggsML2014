@@ -244,7 +244,7 @@ func (dec *Decoder) Decode(evt *Event) error {
 		return err
 	}
 
-	if len(row) > idx+1 {
+	if len(row) > idx+3 {
 		idx++
 		evt.Weight, err = strconv.ParseFloat(row[idx], 64)
 		if err != nil {
@@ -253,6 +253,16 @@ func (dec *Decoder) Decode(evt *Event) error {
 
 		idx++
 		evt.Label = row[idx]
+
+		idx++
+		evt.KaggleSet = row[idx]
+
+		idx++
+		evt.KaggleWeight, err = strconv.ParseFloat(row[idx], 64)
+		if err != nil {
+			return err
+		}
+
 	}
 
 	return err

@@ -33,7 +33,10 @@ type Event struct {
 	PRI_jet_subleading_phi      float64
 	PRI_jet_all_pt              float64
 
-	Weight float64
-	Label  string
-	Score  float64
+	Weight       float64
+	Label        string
+	KaggleSet    string
+	KaggleWeight float64
+
+	Score float64
 }
