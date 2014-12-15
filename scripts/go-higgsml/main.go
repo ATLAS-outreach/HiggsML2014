@@ -1,3 +1,6 @@
+// go-higgsml is a command to exercize a simple window on one variable DER_mass_MMC, to compute the score and build a submission file in Kaggle format.
+//
+// It is heavily based on higgsml_opendata_simplest.py
 package main
 
 import (
@@ -16,15 +19,14 @@ const (
 )
 
 var (
-	g_train = flag.Bool("train", false, "enable training mode")
-
 	// somewhat arbitrary value, should be optimised
 	g_cutoff = flag.Float64("cut", -22.0, "cut-off value")
 )
 
+// Score is the final Kaggle score.
 type Score struct {
-	Id    int
-	Score float64
+	Id    int     // event id
+	Score float64 // score for that event (eg: AMS)
 }
 
 type Scores []Score
@@ -43,6 +45,14 @@ func AMS(sig, bkg float64) float64 {
 	return math.Sqrt(2 * ((sig+bkg+10)*math.Log(1+sig/(bkg+10)) - sig))
 }
 
+func init() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, " $ %s [options] [input-data-file [output.csv]]\n\nOptions:\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -57,33 +67,26 @@ func main() {
 
 func run() error {
 
-	fname := flag.Arg(0)
-	trained := flag.Arg(1)
+	fname := "atlas-higgs-challenge-2014-v2.csv"
+	ofname := "submission_go_simplest.csv"
 
-	if *g_train {
-		err := do_train(fname, trained)
-		return err
+	if flag.NArg() > 0 {
+		fname = flag.Arg(0)
+	}
+	if flag.NArg() > 1 {
+		ofname = flag.Arg(1)
 	}
 
-	ofname := flag.Arg(2)
-	err := run_prediction(fname, trained, ofname)
-	return err
-}
-
-func do_train(fname, ofname string) error {
-	var err error
-
-	fmt.Printf("::: read training file [%s]\n", fname)
-
-	ftrain, err := os.Open(fname)
+	fmt.Printf("::: read data file [%s]\n", fname)
+	f, err := os.Open(fname)
 	if err != nil {
 		return err
 	}
-	defer ftrain.Close()
+	defer f.Close()
 
-	fmt.Printf("::: loop on training dataset and compute the score\n")
+	fmt.Printf("::: loop on dataset and compute the score\n")
 	evts := make([]Event, 0, 1024)
-	dec := NewDecoder(ftrain)
+	dec := NewDecoder(f)
 	for {
 		i := len(evts)
 		evts = append(evts, Event{})
@@ -110,10 +113,43 @@ func do_train(fname, ofname string) error {
 	cutoff := *g_cutoff
 
 	fmt.Printf("::: loop again to determine the AMS, using threshold=%v\n", cutoff)
-	sumsig := 0.0
-	sumbkg := 0.0
+	sum := struct {
+		SelSig float64
+		SelBkg float64
+		AllSig float64
+		AllBkg float64
+		SubSig float64
+		SubBkg float64
+
+		SelKaggleSig float64
+		SelKaggleBkg float64
+	}{}
+
+	fmt.Printf("::: only looking at Kaggle public data set ('b') ('t': training, 'v': private, 'u': unused)\n")
+	fmt.Printf("::: one could make their own dataset (then the weight should be renormalized)\n")
+
 	for i := range evts {
 		evt := &evts[i]
+		// compute sum of signal and background weight needed to renormalize
+		switch evt.Label {
+		case "s":
+			sum.AllSig += evt.Weight
+		default:
+			sum.AllBkg += evt.Weight
+		}
+
+		if evt.KaggleSet != "b" {
+			continue
+		}
+
+		// from now on, only work on subset
+		switch evt.Label {
+		case "s":
+			sum.SubSig += evt.Weight
+		default:
+			sum.SubBkg += evt.Weight
+		}
+
 		// sum event weight passing the selection.
 		// of course, in real life the threshold should be optimised
 		if evt.Score <= cutoff {
@@ -122,79 +158,49 @@ func do_train(fname, ofname string) error {
 		}
 		switch evt.Label {
 		case "s":
-			sumsig += evt.Weight
+			sum.SelSig += evt.Weight
+			sum.SelKaggleSig += evt.KaggleWeight
 		case "b":
-			sumbkg += evt.Weight
+			sum.SelBkg += evt.Weight
+			sum.SelKaggleBkg += evt.KaggleWeight
 		}
 	}
 
+	// ok, now we have our signal (sum.SelKaggleSig) and background (sum.SelKaggleBkg) estimation.
+	// just as an illustration, also compute the renormalization ourself from weight.
+	sumsig := sum.SelSig * sum.AllSig / sum.SubSig
+	sumbkg := sum.SelBkg * sum.AllBkg / sum.SubBkg
 	ams := AMS(sumsig, sumbkg)
-	fmt.Printf("::: AMS computed from training file=%v (sig=%v, bkg=%v)\n",
-		ams,
-		sumsig,
-		sumbkg,
+	fmt.Printf("::: AMS with recomputed weight: %v (sig=%v, bkg=%v)\n",
+		ams, sumsig, sumbkg,
+	)
+	fmt.Printf("::: AMS with kaggle weight: %v (sig=%v, bkg=%v)\n",
+		AMS(sum.SelKaggleSig, sum.SelKaggleBkg), sum.SelKaggleSig, sum.SelKaggleBkg,
 	)
 
-	otrain, err := os.Create(ofname)
-	if err != nil {
-		return err
-	}
-	defer otrain.Close()
+	fmt.Printf("::: recomputed weight and Kaggle-weight should be identical if using a predefined Kaggle-subset\n")
 
-	_, err = fmt.Fprintf(otrain, "cut-off=%v\nams=%v\n", cutoff, ams)
-	if err != nil {
-		return err
-	}
+	fmt.Printf("::: now building submission file a-la-Kaggle: [%s]...\n", ofname)
 
-	err = otrain.Close()
-	if err != nil {
-		return err
-	}
-
-	return err
-}
-
-func run_prediction(fname, trained, ofname string) error {
-
-	fmt.Printf("::: compute the score for the test file entries [%s]\n", fname)
-	ftest, err := os.Open(fname)
-	if err != nil {
-		return err
-	}
-	defer ftest.Close()
-
-	dec := NewDecoder(ftest)
-	tests := make([]Event, 0, 1024)
-	for {
-		i := len(tests)
-		tests = append(tests, Event{})
-		evt := &tests[i]
-		err = dec.Decode(evt)
-		if err != nil {
-			tests = tests[:i]
-			break
+	// build subset with only the needed variables
+	scores := make([]Score, len(evts))
+	for i := range evts {
+		evt := &evts[i]
+		switch evt.KaggleSet {
+		case "b", "v":
+			// ok
+		default:
+			continue
 		}
-
-		evt.Score = -math.Abs(evt.DER_mass_MMC - MassCut)
-	}
-
-	if err != nil && err != io.EOF {
-		return err
-	}
-
-	fmt.Printf("::: loop again on test file to load BDT score pairs\n")
-	testpairs := make([]Score, len(tests))
-	for i := range tests {
-		evt := &tests[i]
-		testpairs[i] = Score{evt.EventId, evt.Score}
+		scores[i] = Score{evt.EventId, evt.Score}
 	}
 
 	fmt.Printf("::: sort on the score\n")
-	sort.Sort(Scores(testpairs))
+	sort.Sort(Scores(scores))
 
 	fmt.Printf("::: build a map key=id, value=rank\n")
-	dict := make(map[int]int, len(testpairs))
-	for rank, bdt := range testpairs {
+	dict := make(map[int]int, len(scores))
+	for rank, bdt := range scores {
 		dict[bdt.Id] = rank + 1 // kaggle asks to start at 1
 	}
 
@@ -204,21 +210,19 @@ func run_prediction(fname, trained, ofname string) error {
 	}
 	defer out.Close()
 
-	cutoff := *g_cutoff
-
 	// write header
 	fmt.Fprintf(out, "EventId,RankOrder,Class\n")
 
-	for i := range tests {
-		evt := &tests[i]
-		rank, ok := dict[evt.EventId]
+	for i := range scores {
+		evt := &scores[i]
+		rank, ok := dict[evt.Id]
 		if !ok {
-			fmt.Printf("*** evt-id=%d not in map\n", evt.EventId)
+			fmt.Fprintf(os.Stderr, "*** evt-id=%d not in map\n", evt.Id)
 			os.Exit(1)
 		}
-		if rank > len(tests) {
-			fmt.Printf("*** large rank=%d for event #%d (id=%d)\n",
-				rank, i, evt.EventId,
+		if rank > len(evts) {
+			fmt.Fprintf(os.Stderr, "*** large rank=%d for event #%d (id=%d)\n",
+				rank, i, evt.Id,
 			)
 			break
 		}
@@ -229,7 +233,7 @@ func run_prediction(fname, trained, ofname string) error {
 			label = "s"
 		}
 
-		fmt.Fprintf(out, "%d,%d,%s\n", evt.EventId, rank, label)
+		fmt.Fprintf(out, "%d,%d,%s\n", evt.Id, rank, label)
 	}
 
 	err = out.Sync()
@@ -242,7 +246,7 @@ func run_prediction(fname, trained, ofname string) error {
 		return err
 	}
 
-	fmt.Printf("::: you can now submit [%s] to Kaggle website\n", out.Name())
+	fmt.Printf("::: now building submission file a-la-Kaggle: [%s]... [done]\n", ofname)
 
 	return err
 }
